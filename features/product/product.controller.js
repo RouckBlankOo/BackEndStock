@@ -3,34 +3,137 @@ const ResHandler = require("../../helpers/res.helper");
 const { paginate } = require('../../helpers/paginate.helper');
 const { default: mongoose } = require("mongoose");
 
+// Add this function to product.controller.js
+const getProductInventory = async (req, res) => {
+  // #swagger.tags = ['Products']
+  const resHandler = new ResHandler();
+  
+  try {
+    const products = await Product.find()
+      .populate('category', 'name')
+      .populate('subCategory', 'name')
+      .lean();
+
+    // Transform into desired format
+    const inventory = products.flatMap(product => 
+      product.stocks.map(stock => ({
+        productId: product._id,
+        productName: product.name,
+        category: product.category.name,
+        subCategory: product.subCategory.name,
+        color: stock.color,
+        size: stock.size,
+        quantity: stock.quantity,
+        price: product.price
+      }))
+    );
+
+    resHandler.setSuccess(200, 'Inventaire récupéré avec succès', inventory);
+    return resHandler.send(res);
+  } catch (error) {
+    console.error('Error fetching inventory:', error);
+    resHandler.setError(500, 'Erreur lors de la récupération de l\'inventaire');
+    return resHandler.send(res);
+  }
+};
+
 const createProduct = async (req, res) => {
   // #swagger.tags = ['Products']
   const resHandler = new ResHandler();
   try {
     const { name, category, subCategory, description, price, stocks } = req.body;
 
+    // Enhanced validation
     if (!name || !category || !subCategory || !price || !stocks) {
       resHandler.setError(400, 'Nom, catégorie, sous-catégorie, prix et stocks sont requis');
       return resHandler.send(res);
     }
 
-    const categoryExists = await Category.exists({ _id: category });
-    if (!categoryExists) {
-      resHandler.setError(400, 'Catégorie invalide');
+    // Validate price
+    if (typeof price !== 'number' || price <= 0) {
+      resHandler.setError(400, 'Le prix doit être un nombre positif');
       return resHandler.send(res);
     }
 
-    const subCategoryDoc = await SubCategory.findOne({ _id: subCategory, category });
+    // Validate stocks array
+    if (!Array.isArray(stocks) || stocks.length === 0) {
+      resHandler.setError(400, 'Au moins un stock est requis');
+      return resHandler.send(res);
+    }
+
+    // Validate each stock item
+    for (const stock of stocks) {
+      if (!stock.color || !stock.size || typeof stock.quantity !== 'number' || stock.quantity < 0) {
+        resHandler.setError(400, 'Chaque stock doit avoir une couleur, taille et quantité valides');
+        return resHandler.send(res);
+      }
+    }
+
+    // Validate category ID format
+    if (!mongoose.Types.ObjectId.isValid(category)) {
+      resHandler.setError(400, 'ID de catégorie invalide');
+      return resHandler.send(res);
+    }
+
+    // Validate subCategory ID format
+    if (!mongoose.Types.ObjectId.isValid(subCategory)) {
+      resHandler.setError(400, 'ID de sous-catégorie invalide');
+      return resHandler.send(res);
+    }
+
+    // Check if category exists
+    const categoryExists = await Category.findById(category);
+    if (!categoryExists) {
+      resHandler.setError(400, 'Catégorie non trouvée');
+      return resHandler.send(res);
+    }
+
+    // Check if subcategory exists and belongs to the category
+    const subCategoryDoc = await SubCategory.findOne({ 
+      _id: subCategory, 
+      category: category 
+    });
     if (!subCategoryDoc) {
       resHandler.setError(400, 'Sous-catégorie invalide ou ne correspond pas à la catégorie');
       return resHandler.send(res);
     }
 
-    const product = await Product.create({ name, category, subCategory, price, stocks, description });
-    resHandler.setSuccess(201, 'Produit créé avec succès', product);
+    // Create the product
+    const productData = {
+      name: name.trim(),
+      category,
+      subCategory,
+      price,
+      stocks,
+      ...(description && { description: description.trim() })
+    };
+
+    console.log('Creating product with data:', JSON.stringify(productData, null, 2));
+
+    const product = await Product.create(productData);
+    
+    // Populate the response
+    const populatedProduct = await Product.findById(product._id)
+      .populate('category', 'name')
+      .populate('subCategory', 'name');
+
+    console.log('Product created successfully:', populatedProduct);
+
+    resHandler.setSuccess(201, 'Produit créé avec succès', populatedProduct);
     return resHandler.send(res);
   } catch (error) {
-    resHandler.setError(500, 'Erreur lors de la création du produit');
+    console.error('Error creating product:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Check for specific MongoDB errors
+    if (error.name === 'ValidationError') {
+      const errorMessages = Object.values(error.errors).map(err => err.message);
+      resHandler.setError(400, `Erreur de validation: ${errorMessages.join(', ')}`);
+    } else if (error.code === 11000) {
+      resHandler.setError(409, 'Un produit avec ce nom existe déjà');
+    } else {
+      resHandler.setError(500, 'Erreur lors de la création du produit');
+    }
     return resHandler.send(res);
   }
 };
@@ -41,9 +144,14 @@ const updateProductStock = async (req, res) => {
   const { id } = req.params;
   const { quantityChange, action } = req.body;
 
+  console.log("=== UPDATE PRODUCT STOCK START ===");
+  console.log("updateProductStock - Params:", { id });
+  console.log("updateProductStock - Body:", { quantityChange, action });
+
   try {
     // Validate input
     if (!quantityChange || !action || !id) {
+      console.log("updateProductStock - Missing required fields");
       resHandler.setError(400, 'Quantité de changement, action et ID du stock sont requis');
       return resHandler.send(res);
     }
@@ -51,94 +159,181 @@ const updateProductStock = async (req, res) => {
     // Validate action
     const validActions = ['add', 'sell', 'update', 'remove', 'return'];
     if (!validActions.includes(action)) {
-      resHandler.setError(400, 'Action invalide. Valeurs attendues: add, sell, update, remove, return');
+      console.log("updateProductStock - Invalid action:", action);
+      resHandler.setError(400, 'Action invalide');
       return resHandler.send(res);
     }
 
-    // Convert stock ID and search for product by stock _id
+    // Convert and validate stock ID
     let stockId;
     try {
       stockId = new mongoose.Types.ObjectId(id);
-      console.log("Searching for stock with ID:", stockId);
     } catch (error) {
+      console.log("updateProductStock - Invalid stock ID format");
       resHandler.setError(400, 'Format d\'ID de stock invalide');
       return resHandler.send(res);
     }
 
-    const product = await Product.findOne({ 'stocks._id': stockId });
-    console.log("Product found:", product);
+    console.log("updateProductStock - Processed stockId:", stockId);
+
+    // Step 1: Find the product and stock using raw MongoDB query (no Mongoose)
+    const db = mongoose.connection.db;
+    const collection = db.collection('products'); // Use your actual collection name
+    
+    console.log("updateProductStock - Searching for product with stock...");
+    const product = await collection.findOne(
+      { 'stocks._id': stockId },
+      { projection: { _id: 1, name: 1, stocks: 1 } }
+    );
 
     if (!product) {
-      resHandler.setError(404, 'Produit non trouvé avec cet ID de stock');
+      console.log("updateProductStock - No product found");
+      resHandler.setError(404, 'Stock non trouvé');
       return resHandler.send(res);
     }
 
-    // Find stock subdocument
-    const stockIndex = product.stocks.findIndex(s => s._id.toString() === stockId.toString());
-    if (stockIndex === -1) {
-      resHandler.setError(400, 'Stock pour cette taille et couleur non trouvé');
+    console.log("updateProductStock - Product found:", product._id);
+
+    // Step 2: Find the specific stock
+    const stock = product.stocks.find(s => s._id.toString() === stockId.toString());
+    if (!stock) {
+      console.log("updateProductStock - Stock not found in product");
+      resHandler.setError(404, 'Stock spécifique non trouvé');
       return resHandler.send(res);
     }
 
-    // Get current stock details
-    const previousQuantity = product.stocks[stockIndex].quantity;
-    const color = product.stocks[stockIndex].color;
-    const size = product.stocks[stockIndex].size;
+    console.log("updateProductStock - Stock found:", {
+      color: stock.color,
+      size: stock.size,
+      currentQuantity: stock.quantity
+    });
 
-    // Calculate new quantity
-    const newQuantity =
-      action === 'add'
-        ? parseInt(previousQuantity) + parseInt(quantityChange)
-        : action === 'sell'
-        ? parseInt(previousQuantity) - parseInt(quantityChange)
-        : action === 'update'
-        ? parseInt(quantityChange)
-        : action === 'remove'
-        ? parseInt(previousQuantity) - parseInt(quantityChange)
-        : action === 'return'
-        ? parseInt(previousQuantity) + parseInt(quantityChange)
-        : parseInt(previousQuantity);
+    // Step 3: Calculate new quantity
+    const previousQuantity = stock.quantity;
+    const changeAmount = parseInt(quantityChange);
+    let newQuantity;
+
+    switch (action) {
+      case 'add':
+        newQuantity = previousQuantity + changeAmount;
+        break;
+      case 'sell':
+        newQuantity = previousQuantity - changeAmount;
+        break;
+      case 'update':
+        newQuantity = changeAmount;
+        break;
+      case 'remove':
+        newQuantity = previousQuantity - changeAmount;
+        break;
+      case 'return':
+        newQuantity = previousQuantity + changeAmount;
+        break;
+      default:
+        newQuantity = previousQuantity;
+    }
+
+    console.log("updateProductStock - Quantity calculation:", {
+      previous: previousQuantity,
+      change: changeAmount,
+      action: action,
+      new: newQuantity
+    });
 
     if (newQuantity < 0) {
-      resHandler.setError(400, 'La quantité ne peut pas être négative');
+      console.log("updateProductStock - Negative quantity not allowed");
+      resHandler.setError(400, `Quantité insuffisante. Stock actuel: ${previousQuantity}`);
       return resHandler.send(res);
     }
 
-    // Update stock quantity
-    product.stocks[stockIndex].quantity = newQuantity;
-    await product.save();
+    // Step 4: Update using raw MongoDB (completely bypassing Mongoose)
+    console.log("updateProductStock - Updating with raw MongoDB...");
+    const updateResult = await collection.updateOne(
+      { 'stocks._id': stockId },
+      { 
+        $set: { 
+          'stocks.$.quantity': newQuantity,
+          'updatedAt': new Date()
+        }
+      }
+    );
 
-    // Record stock history
-    await StockHistory.create({
-      product: product._id,
-      user: req.user._id,
-      color,
-      size,
-      action: action || 'update',
-      quantityChange,
-      previousQuantity,
-      newQuantity,
-    });
+    console.log("updateProductStock - Update result:", updateResult);
 
-    // Send success response
-    resHandler.setSuccess(200, 'Stock mis à jour avec succès', {
+    if (updateResult.matchedCount === 0) {
+      resHandler.setError(404, 'Échec de la mise à jour');
+      return resHandler.send(res);
+    }
+
+    // Step 5: Create stock history (only if absolutely necessary)
+    let historyCreated = false;
+    try {
+      if (StockHistory) {
+        console.log("updateProductStock - Creating stock history...");
+        await StockHistory.create({
+          product: product._id,
+          user: req.user?._id || null,
+          color: stock.color,
+          size: stock.size,
+          action: action,
+          quantityChange: changeAmount,
+          previousQuantity: previousQuantity,
+          newQuantity: newQuantity,
+        });
+        historyCreated = true;
+        console.log("updateProductStock - Stock history created successfully");
+      }
+    } catch (historyError) {
+      console.warn("updateProductStock - Stock history creation failed:", historyError.message);
+      // Don't fail the main operation
+    }
+
+    // Step 6: Send success response
+    const responseData = {
+      success: true,
       productId: product._id,
-      color,
-      size,
-      action,
-      previousQuantity,
-      newQuantity,
-      quantityChange
-    });
+      productName: product.name,
+      stockId: stockId,
+      color: stock.color,
+      size: stock.size,
+      action: action,
+      quantityChange: changeAmount,
+      previousQuantity: previousQuantity,
+      newQuantity: newQuantity,
+      historyCreated: historyCreated,
+      timestamp: new Date().toISOString()
+    };
+
+    console.log("updateProductStock - SUCCESS:", responseData);
+    console.log("=== UPDATE PRODUCT STOCK END ===");
+
+    resHandler.setSuccess(200, 'Stock mis à jour avec succès', responseData);
     return resHandler.send(res);
 
   } catch (error) {
-    console.error("Error updating product stock:", error);
-    resHandler.setError(500, 'Erreur lors de la mise à jour du stock');
+    console.error("=== UPDATE PRODUCT STOCK ERROR ===");
+    console.error("updateProductStock - Error:", error.message);
+    console.error("updateProductStock - Stack:", error.stack);
+    
+    // Determine error type
+    let errorMessage = 'Erreur lors de la mise à jour du stock';
+    let statusCode = 500;
+
+    if (error.name === 'CastError') {
+      errorMessage = 'Format d\'ID invalide';
+      statusCode = 400;
+    } else if (error.code === 11000) {
+      errorMessage = 'Conflit lors de la mise à jour';
+      statusCode = 409;
+    } else if (error.message.includes('validation')) {
+      errorMessage = 'Erreur de validation des données';
+      statusCode = 400;
+    }
+
+    resHandler.setError(statusCode, errorMessage);
     return resHandler.send(res);
   }
 };
-
 
 const updateProduct = async (req, res) => {
   // #swagger.tags = ['Products']
@@ -517,4 +712,5 @@ module.exports = {
   getProductStockHistory,
   getUserStockHistory,
   getAllStockHistory,
+  getProductInventory,
 };

@@ -9,7 +9,7 @@ router.put('/products/:id/stock',[authMiddleware],  ProductController.updateProd
 router.get('/products/:id/stock-history',[authMiddleware],  ProductController.getProductStockHistory);  
 router.get('/get-products',[authMiddleware],  ProductController.getProducts);
 router.put('/products/:id',[authMiddleware],  ProductController.updateProduct);
-
+router.get('/inventory', [authMiddleware], ProductController.getProductInventory);
 // Stock History Routes
 router.get('/user/:userId/stock-history',[authMiddleware],  ProductController.getUserStockHistory);  
 router.get('/stock-history',[authMiddleware],  ProductController.getAllStockHistory);  
