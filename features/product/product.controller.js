@@ -40,6 +40,10 @@ const getProductInventory = async (req, res) => {
 const createProduct = async (req, res) => {
   // #swagger.tags = ['Products']
   const resHandler = new ResHandler();
+  
+  console.log("createProduct - Request started");
+  console.log("createProduct - Body:", req.body);
+  
   try {
     const { name, category, subCategory, description, price, stocks } = req.body;
 
@@ -98,32 +102,42 @@ const createProduct = async (req, res) => {
       return resHandler.send(res);
     }
 
-    // Create the product
+    // Create the product data (without barcode initially)
     const productData = {
       name: name.trim(),
       category,
       subCategory,
       price,
       stocks,
+      barcode: 'TEMP_BARCODE', // Temporary barcode
       ...(description && { description: description.trim() })
     };
 
-    console.log('Creating product with data:', JSON.stringify(productData, null, 2));
+    console.log('createProduct - Creating product with temporary barcode:', JSON.stringify(productData, null, 2));
 
+    // Create the product
     const product = await Product.create(productData);
+    console.log('createProduct - Product created with ID:', product._id);
+
+    // Update the barcode to be the same as the product ID
+    product.barcode = product._id.toString();
+    await product.save();
+    
+    console.log('createProduct - Barcode updated to:', product.barcode);
     
     // Populate the response
     const populatedProduct = await Product.findById(product._id)
       .populate('category', 'name')
       .populate('subCategory', 'name');
 
-    console.log('Product created successfully:', populatedProduct);
+    console.log('createProduct - Product created successfully with barcode:', populatedProduct.barcode);
 
     resHandler.setSuccess(201, 'Produit créé avec succès', populatedProduct);
     return resHandler.send(res);
+    
   } catch (error) {
-    console.error('Error creating product:', error);
-    console.error('Error stack:', error.stack);
+    console.error('createProduct - Error:', error);
+    console.error('createProduct - Error stack:', error.stack);
     
     // Check for specific MongoDB errors
     if (error.name === 'ValidationError') {
